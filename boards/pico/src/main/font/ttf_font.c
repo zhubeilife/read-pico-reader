@@ -72,6 +72,13 @@ static void ttf_free(void* ptr, void* userdata) {
 // vanish after a few page turns (measured: an image wanted 384 KB with 269 KB left).
 // 320 KB still re-rasterizes a page of body text; the cost is a few extra glyphs per turn.
 #define TTF_CACHE_LIMIT (320 * 1024)
+// 实验分支：关闭书内图片后不再需要给插图解码留大块内存，字形缓存允许长到 1 MiB；
+// 但任何时候都要保证 PSRAM 最大连续块不低于 1 MiB，给锁屏/封面解码留余量。
+// Experiment: with book images hidden, illustrations no longer need the headroom, so the glyph
+// cache may grow to 1 MiB, but only while the largest free PSRAM block stays at least 1 MiB
+// for lock-screen and cover decoding.
+#define TTF_CACHE_LIMIT_TEXT_ONLY (1024 * 1024)
+#define TTF_CACHE_PSRAM_RESERVE (1024 * 1024)
 // 哈希桶数。/ Hash buckets.
 #define TTF_CACHE_BUCKETS 256
 // 两档字号的像素高，对齐 ui_kit 正文/标题。/ Small/large px, matches ui_kit body/title.
@@ -1842,11 +1849,25 @@ static void cache_evict_one(void) {
     heap_caps_free(victim);
 }
 
+static bool cache_over_budget(size_t extra) {
+    const size_t want = s_cache_total + extra;
+    if (want <= TTF_CACHE_LIMIT) return false;
+    if (!app_settings_reader_hide_images() || want > TTF_CACHE_LIMIT_TEXT_ONLY) return true;
+    return heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < TTF_CACHE_PSRAM_RESERVE + extra;
+}
+
 static void cache_reserve(size_t extra) {
-    while (lru_tail != NULL && s_cache_total + extra > TTF_CACHE_LIMIT) {
+    while (lru_tail != NULL && cache_over_budget(extra)) {
         cache_evict_one();
     }
-    if (s_cache_total + extra > TTF_CACHE_LIMIT) cache_clear_all();
+    if (cache_over_budget(extra)) cache_clear_all();
+}
+
+// 重新显示书内图片前把缓存收回默认预算，避免插图解码拿不到连续内存。
+// Shrink back to the default budget before book images are prepared again.
+void ttf_font_cache_fit_default(void) {
+    while (lru_tail != NULL && s_cache_total > TTF_CACHE_LIMIT) cache_evict_one();
+    if (s_cache_total > TTF_CACHE_LIMIT) cache_clear_all();
 }
 
 static glyph_entry_t* cache_lookup(uint32_t codepoint, int size) {

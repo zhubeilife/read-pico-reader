@@ -232,6 +232,10 @@ void ttf_font_cache_clear(void);
 /// faces loaded; returns the bytes reclaimed. Call it before opening a book: the system face's
 /// cache is the easiest PSRAM to reclaim and embedded faces need exactly that room.
 size_t ttf_font_cache_clear_all(void);
+#if !KIIKO_BOARD_METALIO47
+/// 实验：把字形缓存收回默认 320 KB 预算。/ Experiment: shrink glyph cache to the default 320 KB budget.
+void ttf_font_cache_fit_default(void);
+#endif
 void ttf_bench_begin(void);
 void ttf_bench_end(ttf_bench_stats_t* out);
 #if KIIKO_BOARD_METALIO47

@@ -384,6 +384,11 @@ if(NOT KIIKO_BOARD_METALIO47)
         if(source MATCHES "(^|/)(settings|book/book_added|apps/app_(device_settings|files|transfer|onboarding))[.]c$")
             set_property(SOURCE "${source}" APPEND PROPERTY COMPILE_OPTIONS "-Os")
         endif()
+        # 实验分支：联网、升级、在线字体、自检、键盘输入法、引导与二维码同样按尺寸优化，给实验功能腾出应用分区；渲染与解码循环不动。
+        # Experiment: also size-optimize networking, OTA, online-font, self-test, keyboard/IME, onboarding and DataMatrix code; render/decode loops untouched.
+        if(source MATCHES "/(ota_online|book_xteink_sync|app_cloud_sync|online_font|online_font_store|pmu_selftest|ui_keyboard|ui_ime|datamatrix|app_onboarding|app_image|book_weread_cover)[.]c$")
+            set_property(SOURCE "${source}" APPEND PROPERTY COMPILE_OPTIONS "-Os")
+        endif()
     endforeach()
     option(PICO_MAIN_CLEAN_EXPERIMENT "Local Pico stronger root-switch white erasure" OFF)
     if(PICO_MAIN_CLEAN_EXPERIMENT)

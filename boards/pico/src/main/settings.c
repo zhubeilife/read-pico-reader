@@ -23,7 +23,8 @@
 #include "settings.h"
 #include "setup_state.h"
 #include "kiiko_board_config.h"
-#define READER_TURN_EFFECT_MAX 2
+// 实验分支：3 = 快速灰阶（GRAY8）。/ Experiment: 3 = fast gray (GRAY8).
+#define READER_TURN_EFFECT_MAX 3
 #include "book/book_font_size.h"
 
 #include <stdio.h>

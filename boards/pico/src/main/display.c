@@ -971,10 +971,13 @@ enum EpdDrawError update_display_area_full_with(
 
 enum EpdDrawError update_display_reader_area(EpdiyHighlevelState *hl,
     const EpdWaveform *wave, enum EpdDrawMode mode, EpdRect area, bool full) {
+    const int64_t push_start = esp_timer_get_time();
     bool held = pico_online_display_begin();
     enum EpdDrawError result;
+    bool pushed = false;
     if (display_needs_full()) result = update_display_full_unlocked(hl);
     else if (!main_before_update(hl, &result)) {
+        pushed = true;
         epd_poweron();
         use_scan_for(wave, mode);
         epd_hl_waveform(hl, wave);
@@ -984,6 +987,14 @@ enum EpdDrawError update_display_reader_area(EpdiyHighlevelState *hl,
         rails_keepalive();
     }
     pico_online_display_end(held);
+    // 实验分支：每次阅读区推屏打一行，便于对比各翻页波形。相数为表内总相数，skip 为无损跳过的前导相。
+    // Experiment: one line per reader push. phases = table length, skip = lossless leading phases skipped.
+    if (pushed) {
+        const EpdWaveformPhases* ph = e0470_waveform_phases(wave, mode & 0xF);
+        ESP_LOGI(TAG, "reader push mode=%d phases=%d skip=%d area=%dx%d@%d,%d full=%d push=%lldms result=%d",
+                 mode & 0xF, ph ? ph->phases : -1, epd_last_leading_skip(), area.width, area.height,
+                 area.x, area.y, full, (long long)((esp_timer_get_time() - push_start) / 1000), result);
+    }
     return result;
 }
 
@@ -1040,6 +1051,36 @@ enum EpdDrawError update_display_text_turn(EpdiyHighlevelState* hl,EpdRect area,
             result = update_display_reader_area(hl, display_main_gray_waveform(), MODE_GL16, area, false);
         else if (result != EPD_DRAW_SUCCESS) result = main_recover(hl, result);
     }
+    pico_online_display_end(held);
+    LATENCY_DISPLAY_END();
+    return result;
+}
+
+// 实验：连续快翻。正文阈值成黑白后用 8 帧跟随 DU（快扫描）一次提交，停下后由阅读页补灰阶收尾。
+// Experiment: rapid consecutive turns. Threshold the body to BW and submit the 8-frame follow DU on the fast
+// scan once; the reader settles gray edges after the user stops.
+enum EpdDrawError update_display_rapid_turn(EpdiyHighlevelState* hl, EpdRect area) {
+    LATENCY_DISPLAY_BEGIN();
+    bool held = pico_online_display_begin();
+    enum EpdDrawError result;
+    const int64_t t0 = esp_timer_get_time();
+    if (display_needs_full()) result = update_display_full_unlocked(hl);
+    else if (main_before_update(hl, &result)) { /* 全局恢复优先。/ Global recovery takes priority. */ }
+    else if (!display_reader_fast_text_prepare(hl, area))
+        result = update_display_reader_area(hl, display_main_gray_waveform(), MODE_GL16, area, false);
+    else {
+        use_scan_for(&E0470_FOLLOW_WAVEFORM, MODE_DU);
+        epd_poweron();
+        epd_hl_waveform(hl, &E0470_FOLLOW_WAVEFORM);
+        result = epd_hl_update_area_diff_exact(hl, MODE_DU, 25, area);
+        epd_hl_waveform(hl, &E0470_WAVEFORM);
+        use_scan_for(&E0470_WAVEFORM, MODE_GL16);
+        rails_keepalive();
+        if (result == EPD_DRAW_NO_PHASES_AVAILABLE) result = EPD_DRAW_SUCCESS;
+        else if (result != EPD_DRAW_SUCCESS) result = main_recover(hl, result);
+    }
+    ESP_LOGI(TAG, "reader rapid push area=%dx%d@%d,%d push=%lldms result=%d", area.width, area.height,
+             area.x, area.y, (long long)((esp_timer_get_time() - t0) / 1000), (int)result);
     pico_online_display_end(held);
     LATENCY_DISPLAY_END();
     return result;
