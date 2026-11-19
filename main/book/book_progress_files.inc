@@ -82,7 +82,9 @@ static esp_err_t disk_write(const char *key, const uint8_t *data, size_t len) {
     uint8_t previous[RECORD_CAP];
     size_t previous_len = sizeof(previous);
     unsigned active = 1;
+    const int64_t dt0 = esp_timer_get_time();
     esp_err_t err = disk_read(key, previous, &previous_len, &active);
+    const int64_t dt1 = esp_timer_get_time();
     if (err == ESP_OK) {
         if (strcmp((const char *)previous + HEADER_SIZE, (const char *)data + HEADER_SIZE))
             return ESP_ERR_INVALID_STATE;
@@ -93,19 +95,37 @@ static esp_err_t disk_write(const char *key, const uint8_t *data, size_t len) {
     unsigned slot = 1 - active;
     char path[PROGRESS_FILE_MAX];
     slot_path(path, key, slot);
-    FILE *file = fopen(path, "wb");
+    // 实验：同长度时原地覆盖，避免 "wb" 截断后重新分配簇（FAT+磨损均衡下每次多擦写数个 4 KB 扇区）。
+    // Experiment: overwrite in place when the size matches, avoiding the truncate-and-reallocate of "wb"
+    // (several extra 4 KB sector rewrites on FAT over wear levelling).
+    FILE *file = fopen(path, "r+b");
+    if (file && (fseek(file, 0, SEEK_END) != 0 || ftell(file) != (long)(len + 4) || fseek(file, 0, SEEK_SET) != 0)) {
+        fclose(file);
+        file = NULL;
+    }
+    if (!file) file = fopen(path, "wb");
+    const int64_t dt2 = esp_timer_get_time();
     if (!file) return ESP_FAIL;
     uint8_t seal[4];
     put32(seal, record_seal(data, len));
     bool ok = fwrite(data, 1, len, file) == len && fwrite(seal, 1, sizeof(seal), file) == sizeof(seal) &&
-              fflush(file) == 0 && fsync(fileno(file)) == 0;
+              fflush(file) == 0;
+    const int64_t dt3 = esp_timer_get_time();
+    ok = ok && fsync(fileno(file)) == 0;
+    const int64_t dt4 = esp_timer_get_time();
     if (fclose(file) != 0) ok = false;
+    const int64_t dt5 = esp_timer_get_time();
     previous_len = sizeof(previous);
     if (!ok || slot_read(key, slot, previous, &previous_len) != ESP_OK ||
         previous_len != len || memcmp(data, previous, len)) {
         (void)unlink(path);
         return ESP_FAIL;
     }
+    // 实验：记录文件写入各步耗时。/ Experiment: per-step timing of the record file write.
+    ESP_LOGI(TAG, "dw s%u n%u rd=%lld op=%lld wr=%lld fs=%lld cl=%lld vf=%lld",
+             slot, (unsigned)len, (long long)((dt1 - dt0) / 1000), (long long)((dt2 - dt1) / 1000),
+             (long long)((dt3 - dt2) / 1000), (long long)((dt4 - dt3) / 1000),
+             (long long)((dt5 - dt4) / 1000), (long long)((esp_timer_get_time() - dt5) / 1000));
     return ESP_OK;
 }
 

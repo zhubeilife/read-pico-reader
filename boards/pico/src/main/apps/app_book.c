@@ -2299,9 +2299,7 @@ static void save_progress(void) {
     const bool saved = pending_flush(pending);
     const int64_t save_t2 = esp_timer_get_time();
     book_ticket_note_position(s_path, &p, chapter, saved || pending->progress_saved);
-    ESP_LOGI(TAG, "progress save prep=%lldms flush=%lldms ticket=%lldms ok=%d",
-             (long long)((save_t1 - save_t0) / 1000), (long long)((save_t2 - save_t1) / 1000),
-             (long long)((esp_timer_get_time() - save_t2) / 1000), (int)saved);
+    (void)save_t0; (void)save_t1; (void)save_t2;
     if (saved) {
         s_unsaved = 0;
         s_save_failed = false;

@@ -1,265 +1,292 @@
-# 小纸 Pico 固件优化 — 交接文档（给 task / Claude Code 会话）
+# 小纸 Pico 翻页提速实验 — 交接文档
 
-> 生成时间：2026-11-18（UTC+8）。来源：与用户在 claude.ai 对话中的完整过程。
-> 读完本文即可接手：目标、结论、已做改动、构建/刷机方法、下一步计划、注意事项都在这里。
-> 同目录 `EDCBook分析报告.md` 是用户提供的原始分析报告（另一个工具生成，含若干错误，见 §8）。
-
-> **2026-11-19 更新**：已快进合并 upstream 到 `fe62ecf`（Pico rc109，含 PR96：普通翻页改为"驱动→厂商定稿保持→12 擦白→4 重推黑"，且整屏含状态栏/页脚）。
-> `build_turn_phases()` 已改为同样顺序，主机测试新增"普通翻页与 PR96 逐相一致"断言并通过；快速灰阶分支沿用整屏区域。
-> 合并后分区溢出 0x7e0，已对 `ui_keyboard|ui_ime|datamatrix|app_onboarding` 追加 `-Os`（`book_ticket` 在 -Os 下触发 -Werror=format-truncation，未加入）。
-> 新编译：版本 `0.3.3-rc109`，size 4,193,088，`free_app_bytes: 1216`，firmware sha256 `f5331649…`。
-> **产物目录现为 `build/boards/packages/pico/`**（`flash-pico.command` 已同步）。合并前的实验 diff 备份在 `backups/exp-p0-gray8-pre-merge-*.patch`，另有 `git stash` 一份。
-> 刷机仍未完成：设备在本 Firmware 下 esptool 无法自动进下载模式；设备上「BOOT 刷机」后串口节点未重新枚举（疑似经扩展坞/Hub），需直插重试。
+> 最后整理：2026-11-19。读完本文即可接手：当前状态、怎么编译刷机和看日志、做过什么及实测结果、下一步按优先级做什么。
+> 同目录 `EDCBook分析报告.md` 是用户提供的原始对标报告（其他工具生成，有若干错误，见 §9）。
+> `serial_log.py` 是串口抓日志脚本（见 §2.4）。
 
 ---
 
-## 0. 一句话现状
+## 0. 现状速览
 
-用户在自己 fork 的 kiikoread 固件上做"让小纸 Pico 翻页更快、接近 EDCBook 手感"的实验。
-**实验分支 `exp/p0-gray8` 已改完并在 Mac 上编译成功（应用分区仅剩 352 字节），尚未刷机、尚未实测。**
-下一步：用户双击 `flash-pico.command` 备份并刷机 → 对比"普通 / 快速灰阶"翻页 → 读串口日志决定后续。
+- **目标**：让小纸 Pico 上的 kiikoread 翻页更快，手感接近 M5 Paper Mono 上的 EDCBook。
+- **实验分支** `exp/p0-gray8`，提交 `74a3fb3`（已合并上游 `0d2411d`，含 #98）。设备上刷的就是这个提交的固件（sha256 `0bcb195e…`，剩余 640 B）。
+- **已完成并实测**：
+  - 快速灰阶翻页：434 ms，普通翻页是 666 ms。
+  - 翻页路径上不再写进度：去掉了约 0.5 s 的周期停顿。
+  - 连续快翻用短 DU：每页约 140 ms。
+  - 快翻时推迟清理和页码刷新，往回翻复用上一页。
+- **上游 PR**：
+  - [#97](https://github.com/wegooo-cell/read-pico-reader/pull/97)：快速灰阶。
+  - [#99](https://github.com/wegooo-cell/read-pico-reader/pull/99)：延后保存与快翻。
+  - [#100](https://github.com/wegooo-cell/read-pico-reader/pull/100)：进度文件原地覆盖（分支 `fix/progress-inplace-write`，工作树 `../read-pico-reader-progress`，Pico 剩 96 B，S31 剩 54,832 B）。
+  - 都在等维护者批准 CI，还没有审阅意见。
+- **暂停中（2026-11-19）**：用户决定等三个 PR 合入后再继续。接手时先 `git fetch upstream`，看 PR 状态，再把上游合进实验分支。
+- **还没在设备上验证**：PR #99 分支本身的固件（实验分支已含同样逻辑，并已实测）。
 
 ---
 
 ## 1. 用户与约束（必须遵守）
 
-- 用户：机器人软件工程师，**对话用中文**。
-- 每条建议都要**可追溯到来源**（文件路径+行号、链接）；"据说"必须变成"据哪里说"。
-- 偏好"搜索 → 核实 → 成文"三步分开；约束通常给得很具体。
-- **只自用，不商用、不发布**（kiikoread 新版代码是 Personal Study License，个人学习/研究/测试允许）。
-- **Python 用 3.14**（用户明确要求记住）。
-- 没有用户明确要求时**不要 git commit / push**；当前改动均未提交。
-- 设备：MindReset 小纸 Pico（型号 RDP-G01-W），ESP32-S3，16 MB Flash，屏 E0470A01 4.7" 684×1216、16 级灰。
-- 用户另有一台 M5 Paper Mono 刷的 EDCBook 固件，喜欢它的速度与显示效果，这是对标对象。
+- 对话用中文。结论要可追溯：给出文件:行号、日志文件或链接。
+- 只自用，不商用、不发布。用户没明确要求时不 commit、不 push。
+- 提交和 PR 的署名用 `zhubeilife <7824663+zhubeilife@users.noreply.github.com>`。本机 git 配的是工作邮箱，不能进公开仓库。
+- 给上游的 PR 用 Apache-2.0，只放功能本身；计时日志和实验文档不进 PR。
+- Python 用 3.14。
+- 设备上不要用在线升级（会被上游固件覆盖）。
+- 不写 SY7636A 的 VCOM、TPS OTP、eFuse，不改供电、VCOM 和分区表。
+- 设备：MindReset 小纸 Pico（RDP-G01-W），ESP32-S3，16 MB Flash，E0470A01 4.7" 684×1216、16 级灰。
 
 ---
 
-## 2. 仓库与环境
+## 2. 环境、编译、刷机、日志
+
+### 2.1 仓库与工作树
 
 | 项 | 值 |
 |---|---|
-| 本地 fork 路径 | `/Users/midea/Workspace/personal/read-pico-reader` |
-| origin | `git@github.com:zhubeilife/read-pico-reader.git` |
-| upstream | `https://github.com/wegooo-cell/read-pico-reader.git`（已 `remote add`，需用户本机 `git fetch upstream`） |
-| 基线 commit | `a0cb3ac`（kiikoread `v0.3.3-rc108`，2026-11-17） |
-| 实验分支 | `exp/p0-gray8`（**未提交**） |
-| ESP-IDF | **v6.1**，源码 `/Users/midea/esp/esp-idf-v6.1`（仓库要求见 `boards/pico/dependencies.lock` `idf: 6.1.0`、CI `espressif/idf:v6.1`、`AGENTS.md` 第 144 行） |
-| IDF_TOOLS_PATH | `/Users/midea/opt/esp`（工具链 xtensa-esp-elf 15.2.0_20251204 等；旧的 IDF 5.5 工具也在，互不影响） |
-| Python | Homebrew `python@3.14`（3.14.10），IDF 环境 `/Users/midea/opt/esp/python_env/idf6.1_py3.14_env` |
-| 板型选择 | `boards/pico`（**不是** `boards/metalio47`，那是另一款 4.7" 设备） |
+| 主工作树 | `/Users/midea/Workspace/personal/read-pico-reader`，分支 `exp/p0-gray8` |
+| origin / upstream | `zhubeilife/read-pico-reader` / `wegooo-cell/read-pico-reader` |
+| PR #97 工作树 | `../read-pico-reader-fastgray`，分支 `feat/pico-fast-gray-turn`（`80b72ac`） |
+| PR #99 工作树 | `../read-pico-reader-rapid`，分支 `feat/pico-rapid-turn`（`643d3bd`，基于上游 `0d2411d`，含 #98） |
+| 对照工作树 | `../read-pico-reader-base`（上游 `fe62ecf`，已无用，可删） |
+| 备份 | `backups/pico-full-20261119-1526.bin`（整片 16 MB，原厂 rc109 状态，sha256 在同名 `.sha256`）；`backups/exp-p0-gray8-pre-merge-20261119-1457.patch` |
 
-### 环境坑（已踩过）
-1. 用户 shell 里残留 `IDF_PATH=/Users/midea/opt/esp-idf-v5.4.4`（目录已不存在）→ `idf_tools.py` 报找不到 `esp_idf_version.h`。检查 `~/.zshrc`/`~/.zprofile`。
-2. `export.sh` 只找不带版本号的 `python3`，macOS 自带的是 3.9.6 → 失败。解决：
-   `export PATH="/opt/homebrew/opt/python@3.14/libexec/bin:/opt/homebrew/opt/python@3.14/bin:$PATH"`
-3. 编译脚本：`python3 tools/build_firmware.py --board pico --python "$(which python)"`（需先 `. $IDF_PATH/export.sh`）。
-   产物：`build/boards/pico/packages/pico/`（bootloader.bin、partitions.bin、firmware.bin、ota_data_initial.bin、flash-command.txt、SHA256SUMS.txt）；完整日志 `build/boards/pico/build.log`；ELF `build/boards/pico/build/Read_Pico.elf`；map `.../Read_Pico.map`。
+实验分支已合并上游 `0d2411d`（#98：水波纹、速读黑白每页后把状态栏和进度条再刷一次白；普通、快速灰阶、快翻和定稿跳过，与 PR #99 相同）。
 
-### 两个一键脚本（在 fork 根目录，已加入 `.git/info/exclude`，不会提交）
-- `build-pico.command`：设好上述环境变量 → `export.sh` → 编译；日志写 `build/build-pico-last.log`。
-- `flash-pico.command`：自动找 `/dev/cu.usbmodem*` → **首次先整片备份 16 MB** 到 `backups/pico-full-*.bin`（备份失败不刷）→ 回车确认 → 按 flash-command 写 0x0/0x8000/0x10000/0xd10000（不全片擦除）→ 打开 `esp_idf_monitor`，并用 `script -q` 存档到 `build/pico-serial-*.log`（退出 Ctrl+]）。
-- 在 Claude Code 里可以直接执行这些命令（终端可用）；在 claude.ai 聊天里只能让用户双击。
+### 2.2 编译
+
+```
+cd /Users/midea/Workspace/personal/read-pico-reader
+export IDF_TOOLS_PATH=/Users/midea/opt/esp
+python3 tools/build_firmware.py --board pico --idf-pico /Users/midea/esp/esp-idf-v6.1 \
+  --python /Users/midea/opt/esp/python_env/idf6.1_py3.14_env/bin/python
+```
+
+- 产物在 `build/boards/packages/pico/`（`firmware.bin` 等），完整日志在 `build/boards/pico/build.log`。要看输出 JSON 里的 `free_app_bytes`。
+- S31 用 `--board metalio47 --idf-metalio47 /Users/midea/esp/esp-idf-v6.1`。
+- **新工作树第一次编译**会报找不到 `xtensa-esp32s3-elf-gcc`。原因：主工作树的 CMakeCache 里存了编译器全路径，新工作树没有。解决办法是把 15.2 工具链加进 PATH：
+  `export PATH="$IDF_TOOLS_PATH/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin:$IDF_TOOLS_PATH/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin:$PATH"`
+- 不要用 `--tools`：它会按通配符先找到 14.2 工具链，版本校验失败。
+- 4 MiB 应用分区几乎满了，加代码前先看余量。不在阅读路径上的源文件已按 `-Os` 编译（`main/CMakeLists.txt` 里 Pico 的 `-Os` 列表）。`book_ticket` 不能加 `-Os`，会触发 `-Werror=format-truncation`。
+
+### 2.3 刷机
+
+- **设备正常开机时**，只写应用分区，约 25 s，不需要 BOOT 模式，设置、进度和 TF 卡都不受影响：
+  ```
+  cd build/boards/packages/pico
+  /Users/midea/opt/esp/python_env/idf6.1_py3.14_env/bin/python -m esptool --chip esp32s3 \
+    --port /dev/cu.usbmodem1101 --before usb-reset --after hard-reset write-flash \
+    --flash-mode dio --flash-size 16MB --flash-freq 80m 0x10000 firmware.bin
+  ```
+- 刷机前要先停掉占着串口的日志脚本。
+- 设备必须直插，不要经过 Hub 或扩展坞。
+- `flash-pico.command`（本地脚本，已加入 `.git/info/exclude`）会写全部四个分区。
+- 如果用了设备上的「BOOT 刷机」，刷完设备会停在下载模式（PMU 拉住了 BOOT 脚）。解决：长按电源键 10 s 强制断电，再按 1 s 开机。
+
+### 2.4 抓日志
+
+`esp_idf_monitor` 需要 TTY，在 Claude Code 里用 `serial_log.py`（会自动重连）：
+
+```
+/Users/midea/opt/esp/python_env/idf6.1_py3.14_env/bin/python -I docs/pico-experiment/serial_log.py \
+  build/pico-serial-$(date +%Y%m%d-%H%M)-<标签>.log 3600
+```
+
+- 放后台跑，测完再分析。锁屏或浅睡会让串口断开，所以测试时不要锁屏。
+- 常用过滤：`sed 's/\x1b\[[0-9;]*m//g' <log> | grep -a -E "turn chapter=|turn summary|reader push|reader rapid|rapid settle|progress|paint cached"`
+
+日志行的含义（实验分支专有）：
+
+| 日志 | 含义 |
+|---|---|
+| `reader push mode= phases= skip= area= full= push=ms` | 一次阅读区推屏：模式、波形总相数、跳过的前导相、区域、耗时 |
+| `reader rapid push area= push=ms` | 快翻 DU 推屏 |
+| `turn summary effect= turn= rapid= cleanup= save= load= glyphs= ... raster= paint= display=` | 每页汇总。`paint` 是整个 `turn_page` 的耗时（含保存、读章和排版），`display` 是推屏耗时 |
+| `paint cached=0/1 ms=` | 本页是否直接用了现成点阵 |
+| `rapid settle page= cleanup=` | 停手后的定稿；`cleanup=1` 表示定稿走 GC16 清理 |
+| `progress save prep= flush= ticket=` / `progress flush record=` | 进度写入的耗时拆分 |
+| `deferred progress save Nms` | 停手后执行的延后保存 |
 
 ---
 
 ## 3. 关键技术结论（带出处）
 
-### 3.1 为什么小纸 Pico 很难达到 EDCBook 的速度
-- **每帧时间**：小纸帧周期固定 **11,090 µs**（官方 `components/e0470_epaper_waveform/README.md`："面板算法文档的设计点"；时序代码 `boards/pico/src/components/read_pico/read_pico_epd_timing.c` 会把每帧补齐到该目标）。EDCBook（960×540 屏）按总线推算约 5.5 ms/帧（报告 §20，推算未实测）。**同样相数，小纸慢约 2 倍。**
-- **EDCBook 的"快"主要来自有损截断**：文字刷新只跑 14/17 步（报告 §12、§20，推算 77–94 ms）；报告 §27 自己承认"步=帧"尚未定论。
-- **小纸生态的"无损跳相"**（`epd_set_leading_skip`，`boards/pico/src/components/read_pico/read_pico_init.c:50` 已开启）只跳开头全屏都不动的相，翻文字页时几乎跳不了，所以**保画质但不明显提速**。报告 §34 把它说成"比 EDCBook 更强"是混淆了画质与速度。
-- e0470 波形的灰阶档全部在尾段（官方 README Trimmer 一节），所以**不能照搬 EDCBook 的"取前 N 相"**，否则文字抗锯齿会丢；小纸上应走裁剪器（保尾裁头）或厂家 GRAY8 表。
-
-### 3.2 kiikoread 现状（`a0cb3ac`，Pico 板）
-| 项 | 现状 | 位置 |
-|---|---|---|
-| 普通翻页波形 | GL16 37 相 + 12 相全屏擦白 + 4 相重推黑 = **53 相 ≈ 588 ms**（作者有意以速度换残影） | `boards/pico/src/main/display_reader_waveform.c` 宏 `READER_SOFT_TURN_SETTLE_EXTRA 12`（第 70 行）/`BLACK_EXTRA 4`；作者注释第 86–104 行 |
-| 翻页分发 | `present()` 中 `s_reader_turn_pending && s_mode==MODE_GL16` 分支调用 `update_display_reader_area(...)` | `boards/pico/src/main/apps/app_book.c` 约 4700 行 |
-| 翻页效果设置 | 0 普通 / 1 水波纹 / 2 速读黑白（实验分支新增 3 快速灰阶） | `boards/pico/src/main/settings.c`、`main/apps/book_reader_controls_{ui,runtime}.inc` |
-| 裁剪参数 | `E0470_TRIM_ERASE_MAX 11 / SAT_CUT 5 / WHITE_SAT_CUT 0 / HOLD 3` → GC16 36 / GL16 37；上限 erase≤19、sat_cut≤13；`e0470_waveform_init()` 用 assert 校验帧数常量 | `components/e0470_epaper_waveform/include/e0470_epaper_waveform.h` 第 80–95 行（含"完整48相实测未改善残影"注释）；`.../e0470_waveform_trim.h`；`boards/pico/src/components/e0470_epaper_waveform/e0470_epaper_waveform.c` 约 294–333 行 |
-| GRAY8 表 | 官方 8 级灰 GC16/GL16 各 30 相（官方称整屏约 360 ms vs 默认约 430 ms）；**基线里 Pico 阅读路径未使用** | 同上 .c；官方 README |
-| 温度 | SY7636A 能读温度并接到 epdiy（`read_pico_board.c` `board_temperature`），但阅读刷新调用里**温度写死 25**；波形只有 0–50 °C 一档 → 温度目前不起作用 | `boards/pico/src/main/display.c`（`epd_hl_update_area*(..., 25, ...)` 多处） |
-| 字形缓存 | 光栅 LRU 上限 320 KB（为插图解码让内存，见注释）；TTF glyf 只有 128 KB 进 PSRAM，其余按 4 KB 扇区从 TF 随机读（1-bit SD 每次"好几毫秒"）；只预排**下一页** | `boards/pico/src/main/font/ttf_font.c` 第 64–93、140–150 行；`app_book.c` 第 606、4382 行附近 |
-| 已有计时 | `present draw=… display=… join=… ms` 常开；`METALIO_LOCAL_LATENCY` 编译开关默认关；`ttf_bench_begin/end`（glyphs/hits/misses/read_us/raster_us） | `app_book.c`、`components/epdiy/CMakeLists.txt:53`、`main/font/ttf_font.h` |
-| 像素时钟 | 默认 18 MHz，欠载回退；帧周期是面板规定，不建议动 | `main/display.h:34`、`read_pico_epd_timing.c` |
-| 分区 | ota_0/ota_1 各 4 MiB，storage(FAT) 5 MiB，末尾约 3 MB 空闲 | `boards/pico/partitions.csv` |
-| 许可 | rc93 及以前 Apache-2.0；之后新增原创内容 Personal Study License | 仓库 `LICENSE` |
-
----
-
-## 4. 实验分支 `exp/p0-gray8` 的改动（全部未提交）
-
-| 改动 | 文件:行 | 说明 |
-|---|---|---|
-| **快速灰阶翻页**（P1-3） | `display_reader_waveform.c`：`build_turn_phases()`（原 soft-turn 构造抽成通用函数，**已验证与原版逐字节一致**），`display_reader_gray8_turn_waveform()` 第 167 行，宏 `READER_GRAY8_TURN_SETTLE_EXTRA/BLACK_EXTRA` 默认 0（第 152 行起，可 `-D` 覆盖） | 纯文字翻页改用 GRAY8 GL16 30 相 ≈ 333 ms（推算）；插图页/周期清理/封面不变 |
-| 只链接 GRAY8 的 GL16 半张 | `boards/pico/src/components/e0470_epaper_waveform/e0470_epaper_waveform.c:223` `e0470_gray8_gl16_phases_only()`；声明在 `components/e0470_epaper_waveform/include/e0470_epaper_waveform.h` | 引用整张 `E0470_GRAY8_WAVEFORM` 会多链接 1.9 KB 的 GC16 表导致分区溢出 |
-| 设置项 3 = 快速灰阶 | `boards/pico/src/main/settings.c:27` `READER_TURN_EFFECT_MAX 3`；`boards/pico/kiiko_board_config.h` `KIIKO_BOARD_READER_TURN_EFFECT_MAX 3`；`main/apps/book_reader_controls_ui.inc`（`RC_EFFECT_COUNT`、按钮宽度按数量计算，3 个时与原布局一致）；`..._runtime.inc`（循环与提示文案） | 阅读设置 → 翻页效果 出现第 4 个按钮"快速灰阶" |
-| 翻页分发 | `app_book.c:4703` effect==3 时用 gray8 波形 | |
-| **字形缓存放大**（P0-2） | `ttf_font.c:80` `TTF_CACHE_LIMIT_TEXT_ONLY 1 MiB`、`TTF_CACHE_PSRAM_RESERVE 1 MiB`；`cache_over_budget()` 第 1852 行；`ttf_font_cache_fit_default()` 第 1868 行；`app_book.c:4627` 显示插图前收回 320 KB | 仅在"关闭书内图片"时允许长到 1 MiB，且 PSRAM 最大连续块需 ≥ 1 MiB |
-| **计时日志**（P0-1） | `display.c:994` `reader push mode= phases= skip= area= full= push=ms`；`app_book.c:4737` `turn summary effect= turn= cleanup= glyphs= hit= miss= sd_read= raster= paint= display=`（`turn_page()` 里用 `ttf_bench_begin/end` 采集，第 6400 行附近） | |
-| 腾分区空间 | `main/CMakeLists.txt:388` 对 `ota_online / book_xteink_sync / app_cloud_sync / online_font / online_font_store / pmu_selftest` 加 `-Os` | 都不在渲染路径；沿用原作者对 settings/files 用 `-Os` 的做法 |
-| 主机测试 | `tools/pico_reader_turn_host_test.c`（编译命令写在文件头） | 断言：普通 = 37+12+4=53 相；快速灰阶 = 30 相且与厂家表只差"黑→黑擦白" |
-
-### 验证状态
-- 主机测试：通过（容器与用户 Mac 上都跑过）：`ordinary turn 53 phases (~588 ms), fast gray 30 phases (~333 ms)`。
-- 完整固件：ESP-IDF v6.1 编译成功，`free_app_bytes: 352`，size 4,193,952，firmware.bin sha256 `3a7763ab…`。
-- **未做**：刷机、真机灰阶/残影/耗时测量。
-- 已踩坑：①声明顺序（`s_turn_glyphs` 需在 `present()` 之前声明，已修）；②分区溢出 0x930（已用上面两招解决）。
-- 原仓库 `tools/run_display_navigation_tests.sh`、`tools/pico_fast_text_host_test.py` 等在基线上也跑不通（路径假设问题），与本改动无关。
-
-### 已知风险/注意
-- 选"快速灰阶"时做的配置备份，刷回上游固件后恢复会失败（上游校验 `BK_TURN <= 2`）；备份前切回"普通"。
-- GRAY8 表没有 kiikoread 对默认 GL16 做的 `e0470_gl16_white_tick` 白色微调，注意白底是否干净。
-- 新文案"快速灰阶 / 快速灰阶翻页"未进英文 locale 目录（中文界面不影响）。
-- **不要用在线升级**，会被上游固件覆盖。
-- 应用分区只剩 352 B：以后加功能先腾空间（例如对更多非渲染文件 `-Os`，或精简日志）。
+- **帧时间是硬限制**：
+  - 小纸全屏扫描 89.15 Hz，即 11.22 ms/帧；快扫描 142.65 Hz。帧周期由面板规定，见官方 `components/e0470_epaper_waveform/README.md` 和 `boards/pico/src/components/read_pico/read_pico_epd_timing.c`。
+  - EDCBook 的屏按推算约 5.5 ms/帧（报告 §20），所以同样相数，小纸慢约一倍。
+  - 每次推屏还有约 60–80 ms 固定开销（§10.1 的实测）。
+- **EDCBook 快在有损截断**（文字只跑 14–17 步），小纸不能照搬：
+  - e0470 波形的灰阶档都在尾段，只取前 N 相会丢抗锯齿。
+  - 要么用厂家的 GRAY8 表，要么用裁剪器保尾裁头（官方 README 的 Trimmer 一节）。
+  - 无损跳相（`epd_set_leading_skip`）在文字页上几乎跳不了相。
+- **普通翻页的组成**：
+  - GL16 37 相 + 12 相整屏擦白 + 4 相重推黑，共 53 相，实测 661–668 ms。
+  - 顺序按上游 PR96：驱动 → 厂商定稿保持 → 擦白 → 推黑。
+  - 代码在 `boards/pico/src/main/display_reader_waveform.c` 的 `build_turn_phases()`。
+- **进度写在内部 flash 的 FAT 文件里，不在 NVS，也不在 TF 卡**：
+  - `main/book/book_progress_files.inc`：每本书两个文件 `/flash/progress/<哈希>.0/.1`，交替写不在用的那个，写完 fsync 再回读校验。NVS 只存序号 `seq` 和最后一本书 `last`。
+  - 存储分区是 `storage`（5 MiB），FAT 挂在磨损均衡上，扇区 4 KB（`CONFIG_WL_SECTOR_SIZE=4096`、`CONFIG_FATFS_SECTOR_4096`），改一点也要擦写整块 4 KB。
+  - 原写法 `fopen("wb")` 先截断再重新分配空间：打开 206–278 ms，fsync 273–345 ms，一次 488–561 ms；NVS 提交只要 1 ms（§10.7）。
+  - 实验分支改为同长度时 `r+b` 原地覆盖：打开 2 ms，fsync 136–137 ms，一次 152–154 ms。
+  - 之前日志里的 `free=0 MB` 说的是 TF 卡，和进度写入无关。
+- **温度没用上**：阅读刷新时温度写死为 25（`boards/pico/src/main/display.c` 多处 `epd_hl_update_area*(…, 25, …)`），波形本来也只有一档温度。
+- **字形缓存**：
+  - 默认光栅缓存上限 320 KB。实验分支在“关闭书内图片”时允许长到 1 MiB（`ttf_font.c` 的 `TTF_CACHE_LIMIT_TEXT_ONLY`）。
+  - 目前测试用的都是内建字体（日志 `using builtin`，`sd_read` 全为 0），这项还没评估。
 
 ---
 
-## 5. 测试方案（刷机后）
+## 4. 已完成的改动与实测
 
-1. 打开纯文字书，"普通"翻 10 页左右；阅读设置 → 翻页效果 → "快速灰阶"，再翻 10 页左右。
-2. 读 `build/pico-serial-*.log`：
-   - `reader push ... phases=53 ...` vs `phases=30 ...`：确认切换生效、比较 `push=`；
-   - `turn summary ... sd_read= raster= paint= display=`：时间花在哪（读卡 / 光栅 / 排版 / 推屏）。
-3. 肉眼：字边缘是否发糙（8 级灰）、白底残影。
-4. 若残影明显：缩短"全刷间隔"，或编译时加 `-DREADER_GRAY8_TURN_SETTLE_EXTRA=4`（多约 44 ms）。
+所有改动都在实验分支 `exp/p0-gray8`（`74a3fb3`）。
 
----
+| # | 改动 | 位置 | 设备实测 | 进上游 |
+|---|---|---|---|---|
+| 1 | **快速灰阶**（翻页效果 3）：GRAY8 GL16 30 相 + 4 相擦白，共 34 相 | `display_reader_waveform.c` 的 `display_reader_gray8_turn_waveform()`；`e0470_gray8_gl16_phases_only()`；设置和界面在 `settings.c`、`kiiko_board_config.h`、`book_reader_controls_{ui,runtime}.inc` | 432–438 ms（普通 666 ms）。30 相不擦白时残影明显，30+4 用户认可 | #97 |
+| 2 | **延后保存进度**：第 8 页和跨章时的保存改到停手 1.5 s 后（`READER_DEFER_TURN_SAVE`） | `app_book.c` 的 `turn_page()`、`on_tick()` | 翻页 `save=0ms`，保存 493–574 ms 都发生在空闲时 | #99 |
+| 3 | **连续快翻用短 DU**：距上一页推完不足 500 ms 时，正文推 8 帧 FOLLOW DU；停手 700 ms 后用当前效果定稿（`READER_RAPID_TURN`） | `display.c` 的 `update_display_rapid_turn()`；`app_book.c` | 推屏 118–134 ms，定稿 638 ms | #99（只对普通效果） |
+| 4 | **快翻时推迟清理和页码刷新**：周期清理留到定稿时做（GC16）；页码不单独 DU；做过清理的页会取消欠下的清理和定稿 | `app_book.c` | 快翻中不再有清理和页码刷新；定稿 577–587 ms + 页码 59–63 ms。取消修复已实测（§10.6） | #99 |
+| 5 | **保留本页和上一页的点阵**：与 `s_next_fb` 三块缓冲轮换，往回翻和同页定稿直接复用（`READER_KEEP_PAGES`，最多多占约 0.8 MB PSRAM） | `app_book.c` 的 `paint_reading()` | 来回翻 paint 从 74–81 ms 降到 16–19 ms | #99 |
+| 6 | 字形缓存在“关闭书内图片”时放大到 1 MiB | `ttf_font.c`、`app_book.c` | 没评估（用的内建字体） | 否 |
+| 7 | 计时日志（§2.4 的表） | `display.c`、`app_book.c` | — | 否 |
+| 8 | 主机测试：普通翻页与 PR96 逐相一致，快速灰阶 = 30 + 4 | `tools/pico_reader_turn_host_test.c`（编译命令在文件头） | 通过 | 否 |
 
-## 6. 优化路线图（按优先级；✅=已在实验分支，⏳=待做）
+### 4.1 实验分支和 PR #99 的差别
 
-**P0 几乎零成本**
-1. ✅ 翻页计时日志（借鉴 EDCBook 分阶段汇总日志，报告 §5.2）。
-2. ✅ 关书内图片 + 字形缓存放大（借鉴 EDCBook 纯文本模型 §41；RickyOS 阅读字体 1 MiB PSRAM 字形缓存 `docs/engineering/sd-card-font-cache.md`）。kiikoread 已有"关闭书内图片"开关（README 第 136 行）。
-
-**P1 核心提速（不碰厂家 LUT 数据）**
-3. ✅ 文字翻页用 GRAY8（借鉴 Pico Page / VanOS / AuraReader，报告 §32.2、§32.5）。
-4. ⏳ 翻页档位：把额外 12+4 相做成"极速 0 / 均衡 / 洁净 12+4"（借鉴 EDCBook `TEXT_FAST/BALANCED/CRISP` profile，报告 §5、§12）。最小实验：把两个宏改 0 编译对比。
-5. ⏳ 自适应清残影：按"快档翻页数"或累计变化面积触发 GC16（借鉴 EDCBook `HISTORY_REBASE`、CrossLink"差分链上限" §32.6、Just Read/Pico Page"局刷 N 次后全刷"）。现状只有固定 5/10/15/30 页。与 3/4 一起做。
-
-**P2 看日志决定**
-6. ⏳ 阅读字体放进空闲 OTA 分区做 flash 缓存（借鉴 RickyOS：非活动 OTA 槽作为一份阅读字体缓存，`sd-card-font-cache.md`）。条件：日志显示冷页卡在 `sd_read`。代价：每次 OTA 后要重建；字体需 < 4 MB（如 GB2312 子集）。不需改分区表。
-7. ⏳ 连续快翻用 8 帧 DU（`E0470_FOLLOW_WAVEFORM`，约 90 ms），停下后 GL16 收尾（借鉴 EDCBook `TEXT_RAPID_BEGIN/CONTINUE/SETTLE`）。只对快速连翻有用。
-8. ⏳ 预排上一页（非借鉴，自提；多占约 416 KB PSRAM）。
-
-**P3 收益不确定/风险高**
-9. ⏳ 更狠的自定义裁剪（EDCBook 截断思路；注意 CrossLink 反而更保守用了 39 相，§32.5）。只在 P1 后仍嫌慢时做，需真机反复调残影。
-10. ⏳ 温度分档：先把写死的 25 换成 `epd_ambient_temperature()`（注意 SY7636A 需电源轨上电后读数才有效），冷时用完整 48 相/洁净档。**冬天观察到冷天发灰再做**。
-11. ⏳ 色调曲线 + 误差扩散（CrossLink §32.7）：只对封面/壁纸有用，kiikoread 已有 16 级 + 有序抖动（README 第 180 行）。
-
-**明确不建议**
-- 照搬 EDCBook 整套预烘焙字库分区（改分区表、失去字号/字体灵活性；第 6 项代价更小）。
-- CrossLink 的 DC 平衡（只有字符串证据）。
-- 缩短帧周期 / 改像素时钟（面板规定，硬件风险）。
-- 引入完整 FreeType（300 PPI 下汉字 hinting 收益小；RickyOS 在小纸上正文其实只有 4 级灰，见其 `docs/engineering/read-pico.md`）。
-
-**参考的同类固件仓库**：`MindReset/read_pico_firmware`（官方基线，Apache-2.0）、`chinoryunqin/RickyOS`、`XHFO/XH-View-OS-For-Pico`、`Yana-Hangabina/cpyos`、`yiifanrecyclable/if-ink-OS`、`0x1abin/freeink-sdk`。
+- PR #99 基于上游 `0d2411d`。快翻时也跳过 #98 的状态栏和进度条刷白，留给定稿。
+- PR #99 只对普通效果启用快翻，因为上游没有快速灰阶。
+- PR #99 没有日志。`-Os` 列表和 #97 完全相同，两个 PR 都合并时不冲突，但合并后的 Pico 镜像可能超出分区。
+- 编译余量：
+  - PR #99：Pico 剩 1,440 B，S31 剩 54,928 B。
+  - PR #97：Pico 剩 2,320 B。
+- 主机测试在 macOS 上，有无改动都是 34 项失败（环境原因），没有新增失败。
 
 ---
 
-## 7. 推荐的工作方式
+## 5. 关键数字速查（实测，Pico，2026-11-19）
 
-- 每做一项：改代码 → `tools/pico_reader_turn_host_test.c` 之类主机测试 → `build-pico.command` → 看 `free_app_bytes` → `flash-pico.command` → 读串口日志 → 用户肉眼确认。
-- 改动尽量集中在 `boards/pico/src/main/display_reader_waveform.c` 和新文件里，便于定期合并 upstream（作者更新很勤：35 个 release）。
-- 用 `git fetch upstream && git merge upstream/main` 同步（只能在用户 Mac 上执行）。
+| 场景 | 耗时 |
+|---|---|
+| 普通翻页推屏（53 相） | 661–668 ms（亮屏后前两次约 730 ms） |
+| 快速灰阶推屏（34 相） | 432–438 ms |
+| 速读黑白推屏（DU 20 相） | 304–310 ms + 页码 59 ms |
+| 快翻 DU 推屏 | 118–134 ms |
+| 周期清理 GC16（48 相，正文） | 577–609 ms |
+| 页码单独 DU | 59–67 ms |
+| 预排命中的排版 | 15–19 ms |
+| 未命中的排版（同章） | 50–185 ms，取决于字数 |
+| 一次进度写入（FAT 文件） | 原写法 488–574 ms；原地覆盖后 152–154 ms |
+| `load_chapter` | 58–137 ms（短章），567 ms（52 页的章） |
 
----
-
-## 8. 原始分析报告（`EDCBook分析报告.md`）里已发现的错误
-
-1. §34 把"无损跳相"说成比 EDCBook 截断"更强"——只对画质成立，对速度几乎无帮助（§3.1）。
-2. §41.4 用小纸相数（37/48）乘 EDCBook 的 5.5 ms/相，时间低估一半；且"剔除图片"对纯文字页无提速，kiikoread 已有关图开关。
-3. §38 说温度分档"改动面很干净"——代码容易，难的是没有厂家多温度 LUT 数据。
-4. 标题写 17 个系统，表里 18 个；§32.1 第 4 条仍称 CrossLink 为 B 族（§39 才更正）。
-5. 称 if-ink OS 独有 `e0470_page_turn`——kiikoread 也有（水波纹引擎）。
-6. 称 B 族在小纸上 16 级灰——RickyOS 正文是 4 级灰。
-7. 称 CPYOS `absolute_grayscale` 是 16 灰实验——实为抖动算法单元测试。
-8. CrossLink 排第二（S2）不适合文字阅读：其优势在图片（色调曲线/误差扩散），且闭源不可改。
+日志都在 `build/`：`pico-serial-20261119-{1531,1541,1622-retest,1645-keep,1651-chsave}.log`。
 
 ---
 
-## 9. 关键数字速查
+## 6. 下一步（按优先级）
 
-| 项 | 数值 | 来源 |
-|---|---|---|
-| 小纸帧周期 | 11,090 µs | 官方 e0470 README |
-| 普通翻页 | 53 相 ≈ 588 ms（推算） | `display_reader_waveform.c` + 主机测试 |
-| 默认 GL16 | 37 相 ≈ 410 ms（推算）；官方称整屏约 430 ms | 同上 / 官方 README |
-| GRAY8 GL16 | 30 相 ≈ 333 ms（推算）；官方称整屏约 360 ms | 同上 |
-| FOLLOW DU | 8 帧 ≈ 90 ms | `E0470_FOLLOW_WAVEFORM` |
-| EDCBook 文字 | 14–17 步 ≈ 77–94 ms（推算，未定论） | 报告 §20、§27 |
-| 应用分区余量 | 352 B（实验分支） | 编译输出 `free_app_bytes` |
+1. **往回连续翻页时也预排**（中）：
+   - 现在只预排下一页，再留一份上一页。往回连续翻时，每页都要现排 65–159 ms（§10.6）。
+   - 做法：按上一次翻页方向决定预排的目标页（往回就排上一页），预排结果放进空出的缓冲。
+2. ~~进度文件原地覆盖~~：已提 PR #100（§10.7）。剩下的 137 ms 是 fsync 时重写数据块和目录块，再省要动 FatFs 或换存储方式，不建议。
+3. **插图页提速**（中到大）：
+   - 带插图的页不预排，也不走普通翻页和快翻：排版加解码 290–410 ms，推屏走正文区 GL16（§10.6）。
+   - 可以先试着在空闲时预解码下一页的插图，要注意 PSRAM（插图解码会先回收缓存）。
+4. **预读下一章**（大）：
+   - 跨进大章还要约 0.75 s（读章 567 ms + 首页排版 180 ms）。短章节多的书收益最大。
+   - 难点：要第二份章节文本和排版缓冲，增加内存，还要处理插图页和跨章往回翻。
+5. **跟进 PR #97、#99**（被动）：维护者批准 CI 或提意见后处理；两个都合并时检查 Pico 镜像大小。
+6. **评估 1 MiB 字形缓存**（中）：
+   - 用 TF 卡上的外置字体测冷页的 `sd_read` 和 `raster`。
+   - 没收益就删掉这项，省出代码空间。
+   - 只有用外置字体的人会受益。
+7. **普通翻页的擦白档位**（小，用户已暂缓）：把普通翻页额外的 12+4 相做成可选档位，用残影换速度。
+8. **温度分档**（低）：先把写死的 25 换成实测温度。等冬天出现冷天发灰再做。
+
+**明确不建议**：
+- 照搬 EDCBook 的预烘焙字库分区：要改分区表，还失去字号和字体的灵活性。
+- 缩短帧周期或改像素时钟：面板规定的参数，有硬件风险。
+- 引入完整 FreeType。
+- CrossLink 的 DC 平衡：只有字符串证据。
 
 ---
 
-## 10. 首次真机结果（2026-11-19，rc109 实验固件，日志 `build/pico-serial-20261119-1531.log`）
+## 7. 已知问题与风险
 
-| 翻页效果 | 相数（跳过） | 刷新区域 | 推屏 push（次数 / 最小 / 中位 / 最大） |
-|---|---|---|---|
-| 普通（effect=0） | 53（0） | 整屏 684×1216 | 10 / 651 / 666.5 / 669 ms |
-| 快速灰阶（effect=3） | 30（1） | 整屏 684×1216 | 9 / 374 / 386 / 391 ms |
+- 选了“快速灰阶”后做的配置备份，刷回上游固件后恢复会失败（上游校验 `BK_TURN <= 2`）。备份前先切回“普通”。
+- 延后保存：停手 1.5 s 内突然断电，会丢掉最近几页或这一章的进度。锁屏和退出时仍会当场保存。
+- 快翻 DU 期间正文是阈值后的黑白，状态栏不更新，要等定稿。
+- `-Os` 不宜继续扩大到阅读路径上的文件，会拖慢渲染。
+- “快速灰阶”文案只进了中文和 `en.json`。
 
-- 推屏少约 280 ms（−42%）。按 89.15 Hz（11.22 ms/帧）算：53×11.22≈595、29×11.22≈325，实测多出约 60–70 ms，是每次推屏的固定开销。
-- 预排命中的翻页：`paint` 24–40 ms，`glyphs=0`。少数翻页出现 `paint` 634–1542 ms、`raster` 90–451 ms（`glyphs` 80–3206），疑为跨章或切换效果后预排失效导致的重排。`sd_read` 全为 0，因为当前用的是内建字体（日志 `using builtin`），**瓶颈不在读卡**。
-- 普通模式约第 10 页触发一次周期清理：正文 GC16 48 相 608 ms，页脚另走 8 相 DU 59 ms。
-- 其他：TF 卡 `free=0 MB`；开机后「BOOT 刷机」会让设备卡在下载模式，需长按电源键 10 s 断电再开机。
+---
 
-### 10.1 第二轮（2026-11-19 15:42，GRAY8 30+4 擦白，fw `8858b1c1…`，日志 `build/pico-serial-20261119-1541.log`）
+## 8. 参考
 
-| 翻页效果 | 相数（跳过） | 刷新区域 | 推屏耗时 |
-|---|---|---|---|
-| 快速灰阶 30+4 | 34（1） | 整屏 | 11 次 432–438 ms（中位约 433） |
-| 速读黑白（effect=2） | DU 20 相（日志未单独打 push 行） | 正文；页码约 67 ms 后另走 8 相 DU 59 ms | 10 次 304–310 ms |
+- 同类固件：
+  - `MindReset/read_pico_firmware`：官方基线，Apache-2.0。
+  - `chinoryunqin/RickyOS`：用非活动 OTA 槽缓存字体，见 `docs/engineering/sd-card-font-cache.md`。
+  - 其他：`XHFO/XH-View-OS-For-Pico`、`Yana-Hangabina/cpyos`、`yiifanrecyclable/if-ink-OS`、`0x1abin/freeink-sdk`。
+- 借鉴关系：
+  - EDCBook 的 `TEXT_RAPID_BEGIN/CONTINUE/SETTLE`，对应 §4 第 3 项。
+  - EDCBook 的分阶段汇总日志，对应 §4 第 7 项。
+  - Pico Page、VanOS、AuraReader 文字页用 GRAY8，对应 §4 第 1 项。
 
-- 加 4 相擦白多花约 47 ms（386→433）。固定开销仍约 60–80 ms/次。
-- 快速灰阶第 10 页触发周期清理（GC16 48 相 603 ms + 页脚 59 ms）。
-- 两种模式各有一次 `paint` 514/532 ms 但 `glyphs=0`，不是光栅化，原因待查（排版/存进度？）。
-- **用户实屏验收（2026-11-19）**：30 相无额外擦白时残影明显；30+4 擦白后残影可以接受。默认值定为 `READER_GRAY8_TURN_SETTLE_EXTRA 4 / BLACK_EXTRA 0`。
+---
 
-## 11. 上游 PR（2026-11-19）
+## 9. 原始报告（`EDCBook分析报告.md`）里的错误
 
-- https://github.com/wegooo-cell/read-pico-reader/pull/97 ，分支 `zhubeilife:feat/pico-fast-gray-turn`（commit `80b72ac`，基于 upstream `fe62ecf`），只含快速灰阶 30+4，Apache-2.0。作者用 GitHub noreply 邮箱提交。
-- 工作树：`../read-pico-reader-fastgray`（PR 分支）、`../read-pico-reader-base`（upstream main 对照，可删）。
-- 与实验分支差异：PR 不含计时日志、字形缓存放大；`-Os` 列表为 `online_font|online_font_store|ota_online|pmu_selftest|ui_keyboard|ui_ime|datamatrix`（Pico 余 2,320 B）。
-- macOS 上按 build.yml 跑主机测试：上游 main 本地即有 16 项失败，PR 无新增；`reading_settings_host_test.py` 已改为按板型按钮数。
+1. §34 说“无损跳相”比 EDCBook 截断更强：这只对画质成立，对速度几乎没帮助。
+2. §41.4 用小纸相数乘 EDCBook 的 5.5 ms/相，时间低估了一半。
+3. §38 说温度分档改动很干净：代码好改，难在没有厂家多温度 LUT。
+4. 标题写 17 个系统，表里列了 18 个；§32.1 仍称 CrossLink 为 B 族（§39 才更正）。
+5. 说 if-ink OS 独有 `e0470_page_turn`：kiikoread 也有（水波纹引擎）。
+6. 说 B 族在小纸上是 16 级灰：RickyOS 正文是 4 级灰。
+7. 说 CPYOS 的 `absolute_grayscale` 是 16 灰实验：实际是抖动算法的单元测试。
+8. 把 CrossLink 排在第二不适合文字阅读：它强在图片处理，而且闭源。
 
-## 12. 停顿排查 + 连续快翻短波形（2026-11-19 16:22，日志 `build/pico-serial-20261119-1622-retest.log`，fw `bea1ca32…`）
+---
 
-改动（仅实验分支，`app_book.c` / `display.c`）：
-- `READER_DEFER_TURN_SAVE`：第 8 页的 `save_progress` 不再在翻页路径上执行，改为空闲 1.5 s 后写。
-- `READER_RAPID_TURN`：距上次翻页完成 <500 ms 且无清理、效果为普通/快速灰阶时，正文改推 8 帧 FOLLOW DU（`update_display_rapid_turn`）；停手 700 ms 后用原效果补一次定稿。
+## 10. 实验记录（按时间）
 
-实测（普通效果）：
+### 10.1 快速灰阶首测（15:31，`pico-serial-20261119-1531.log`）
+- 普通 53 相：10 次，651–669 ms。GRAY8 30 相（跳过 1 相）：9 次，374–391 ms。
+- 按帧时间推算，每次推屏有 60–70 ms 固定开销。
+- 第 10 页左右触发周期清理：GC16 608 ms，加页码 DU 59 ms。
 
-| 场景 | 次数 | 推屏 | 备注 |
-|---|---|---|---|
-| 慢翻（普通 53 相） | 12 | 661–668 ms（刚上电前两次约 730） | `save=0ms`，停顿消失 |
-| 快翻 DU | 19 | 129–134 ms | 每次另有页脚 8 相 DU 59 ms |
-| 快翻定稿 | 1 | 638 ms（53 相） | 停手约 770 ms 后触发 |
-| 周期清理 GC16 | 3 | 603–609 ms | 第 81、87、95 页；后两次打断了快翻 |
-| 延后存进度 | 2 | 493 / 574 ms | 都在空闲时，`record` 写入占 488 / 568 ms |
+### 10.2 快速灰阶 30+4（15:41，`…-1541.log`）
+- 34 相：11 次，432–438 ms。速读黑白：10 次，304–310 ms。
+- 用户实屏判断：30 相不擦白时残影明显，30+4 可以接受。
+- 当时两次 `paint` 514/532 ms 而 `glyphs=0`：后来查明是第 8 页的进度保存（`paint` 含保存时间）。
 
-- **停顿根因确认**：`book_progress_save` 写记录约 0.5 s（TF 卡 `free=0 MB`）。延后后翻页路径不再受影响。
-- 往回翻时上一页没有预排：`paint cached=0` 74–81 ms（`glyphs` 约 230）。
-- 待改：快翻期间推迟周期清理，留到定稿时做；页脚 DU 可在快翻时省掉、定稿统一刷；可预排上一页。
-- 待用户实屏判断：快翻 DU 的残影、定稿后是否干净。
+### 10.3 延后保存 + 快翻 DU（16:22，`…-1622-retest.log`）
+- 慢翻 12 次 `save=0ms`，停顿消失。快翻 DU 19 次，129–134 ms，每次另有页码 DU 59 ms。
+- 周期清理在快翻中插进来 2 次，每次约 600 ms。
+- 往回翻没命中缓存，排版 74–81 ms。
 
-## 13. 快翻三项优化（2026-11-19 16:45，日志 `build/pico-serial-20261119-1645-keep.log`，剩余 832 B）
+### 10.4 推迟清理/页码 + 保留上一页（16:45，`…-1645-keep.log`）
+- 5↔6 来回快翻 30 多次：全部命中缓存，排版 16–19 ms，DU 118–120 ms。
+- 定稿带清理：577 / 587 ms。
+- 跨章那一页仍有 `save=495/574ms`：跨章时的保存当时还在翻页路径上。
 
-改动（`app_book.c`）：
-- 快翻中轮到周期清理时记 `s_rapid_cleanup_due`，停手定稿改走 GC16 48 相；定稿前就慢翻则在该页补做。
-- 快翻时页脚不单独 DU，留给定稿；定稿被打断时元数据节拍约 1 s 后兜底。
-- `READER_KEEP_PAGES`：本页 / 上一页正文点阵与 `s_next_fb` 三缓冲轮换（多约 0.8 MB PSRAM），往回翻和同页定稿直接复用。
+### 10.5 跨章保存延后（16:51，`…-1651-chsave.log`）
+- 跨章 `save=0ms`。跨进 52 页的第 4 章：`load_chapter` 567 ms + 排版 180 ms。
+- 第 4 章第 2 页：`turn=0`、没有预排，382 ms，原因见 §10.6（该页带插图）。
+- 发现快翻中欠下的清理没被后面的普通清理页取消，停手后多做了一次 GC16（510 ms）。已修复，§10.6 实测通过。
 
-实测：
-- 5↔6 来回快翻 30+ 次：全部 `cached=1`，paint 16–19 ms，DU 推屏 118–120 ms，没有页脚 DU，也没有中途清理。
-- 两次定稿都带清理：GC16 577 / 587 ms + 页脚 63 ms。
-- 新发现：跨章时 `save_progress` 仍在翻页路径上（`save=495/574ms`），再加 `load_chapter` 58–137 ms 和新章首页排版 134–185 ms，跨章那一页共 0.77–0.81 s。短章节的书很明显。
+### 10.6 合并上游 #98 后补测（17:18，`…-1718-merge98.log`，fw `0bcb195e…`）
+- **取消修复生效**：快翻后的定稿带清理时只做一次 GC16（578 ms）加页码 59 ms；第 3 章第 1 页慢翻本身触发清理（601 ms）后，之前待做的定稿被取消，没有重复刷新。
+- **#98 刷白**：速读黑白每页 363–374 ms，合并前是 304–310 ms，多出约 60 ms，是状态栏和进度条两次 4 相刷白。普通、快翻和定稿都没有额外刷白。
+- **跨章后几页慢的原因已查明**（§6 原第 2 项）：第 4 章第 2、4、5、7 页带插图。
+  - 这几页 `full=1` 的推屏走正文区 GL16，排版加解码 290–410 ms。
+  - 紧跟其后的纯文字页因上一页不是纯文字页，也是 `turn=0`、不预排（105–138 ms），推屏改走正文区差分 GL16，另有页码 DU 59 ms。
+  - 这是现有插图处理的设计，不是故障。
+- **往回连续翻**（第 3 章 9→4 页）：每页 `cached=0`，排版 65–159 ms，因为只预排下一页，上一页只在刚往前翻过时才有。
+- 快翻 DU 107–134 ms；非全屏时正文区较小（684×872），推屏 107–119 ms。延后保存 493–583 ms，都在空闲时。
 
-## 14. 跨章保存延后（2026-11-19 16:51，日志 `build/pico-serial-20261119-1651-chsave.log`）
-
-- 跨章的 `save_progress` 也改为置 `s_progress_save_due`，停手后写（498 ms，空闲时）。跨章那页 `save=0ms`。
-- 跨进 52 页的第 4 章：`load_chapter` 567 ms + 首页排版 180 ms（848 字），这一页约 0.75 s。现在跨章的主要开销是读入并排版新章，要再快需预读下一章。
-- 发现并修复：快翻中欠下的清理没在随后的普通清理页作废，停手后又做了一次 GC16（510 ms）。现在任何一页做了清理，就同时取消欠下的清理和待定稿（fw 剩余 928 B）。
-- 第 4 章首页之后那一页 `turn=0` 且没有预排（`paint cached=0` 382 ms），疑为首页带插图或题头，导致不走预排，未细查。
+### 10.7 进度保存耗时拆分与原地覆盖（17:27 `…-1727-savetiming.log`、17:32 `…-1732-inplace.log`）
+- 拆分（8 次，每次 80 字节）：NVS 序号提交 1 ms，读旧记录 4 ms，`fopen("wb")` 206–278 ms，写入 0 ms，fsync 273–345 ms，关闭和回读 2 ms。
+- 推测：`wb` 先截断（改 FAT 表和目录），fsync 再分配簇、写数据、再改 FAT 表和目录，每次都整块重写 4 KB 扇区。
+- 改为长度相同时 `fopen("r+b")` 原地覆盖（`main/book/book_progress_files.inc`），长度不同或文件不存在时仍用 `wb`：
+  - 5 次实测：打开 2 ms，fsync 136–137 ms，一次保存 152–154 ms，约快 3.3 倍。
+  - 断电安全性不变：仍只写不在用的那个文件，回读校验失败会删掉它，另一个文件仍是上一次的有效记录。
+- 为腾代码空间，删掉了 `progress save prep/flush/ticket` 日志；`dw` 那行计时日志还在（剩余 352 B）。

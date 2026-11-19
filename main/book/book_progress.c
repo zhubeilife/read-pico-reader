@@ -22,6 +22,12 @@
 #include "esp_log.h"
 #include "nvs.h"
 #ifdef ESP_PLATFORM
+#include "esp_timer.h"
+#define PROG_NOW_US() esp_timer_get_time()
+#else
+#define PROG_NOW_US() 0
+#endif
+#ifdef ESP_PLATFORM
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -285,10 +291,13 @@ esp_err_t book_progress_save(const char* path, const book_progress_t* progress) 
     char key[11];
     make_key(path, key);
     book_progress_prepare();
+    // 实验：分段计时，定位进度写入耗时。/ Experiment: per-stage timing of the progress write.
+    const int64_t pt0 = PROG_NOW_US();
     nvs_handle_t h;
     esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
     if (err != ESP_OK) return warn_error(err);
     err = check_owner(h, key, path);
+    const int64_t pt1 = PROG_NOW_US();
     uint32_t sequence = 0;
     if (err == ESP_OK) {
         err = nvs_get_u32(h, "seq", &sequence);
@@ -299,14 +308,17 @@ esp_err_t book_progress_save(const char* path, const book_progress_t* progress) 
     // Commit the sequence reservation before progress; failures may leave gaps, never reverse order after restart.
     if (err == ESP_OK) err = nvs_set_u32(h, "seq", ++sequence);
     if (err == ESP_OK) err = nvs_commit(h);
+    const int64_t pt2 = PROG_NOW_US();
     put32(data + 16, sequence);
 #ifdef ESP_PLATFORM
     if (err == ESP_OK) err = disk_write(key, data, HEADER_SIZE + path_len);
 #else
     if (err == ESP_OK) err = nvs_set_blob(h, key, data, HEADER_SIZE + path_len);
 #endif
+    const int64_t pt3 = PROG_NOW_US();
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
+    (void)pt0; (void)pt1; (void)pt2; (void)pt3;
     book_progress_notify_changed();
     return warn_error(err);
 }
