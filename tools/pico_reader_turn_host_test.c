@@ -1,6 +1,8 @@
-/* SPDX-License-Identifier: Apache-2.0
- * 中文：实验分支——检查小纸普通翻页（GL16 37+12+4 相）与快速灰阶翻页（GRAY8 GL16 30+4 擦白相）的构造。
- * English: Experiment branch — check Pico ordinary turns (GL16 37+12+4) and fast-gray turns (GRAY8 GL16 30+4 white).
+/* SPDX-FileCopyrightText: 2026 zhubeilife
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * 中文：检查小纸普通翻页（GL16 37+12+4 相）与快速灰阶翻页（GRAY8 GL16 30+4 擦白相）的构造。
+ * English: Check Pico ordinary turns (GL16 37+12+4) and fast-gray turns (GRAY8 GL16 30+4 white).
  *
  * cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -DKIIKO_BOARD_METALIO47=0 \
  *   -Imain -Itools/waveform_host_stubs -Icomponents/epdiy/include -Icomponents/epdiy/src \

@@ -19,8 +19,8 @@ const EpdWaveform* display_reader_fast_text_waveform(void);
 /// Ordinary uses board-native profiles: Pico holds equal grays and adds four changed-white phases; S31 retains Moku GL37 plus six white-target phases.
 const EpdWaveform* display_reader_soft_turn_waveform(void);
 #if !KIIKO_BOARD_METALIO47
-/// 实验：快速灰阶翻页（官方 GRAY8 GL16 30 相）；构造失败时回落到普通翻页波形。
-/// Experiment: fast-gray turns on official GRAY8 GL16 (30 phases); falls back to the ordinary turn.
+/// Pico快速灰阶翻页：官方GRAY8 GL16 30相加4相整屏擦白；构造失败时回落到普通翻页波形。
+/// Pico fast-gray turns: official GRAY8 GL16 (30 phases) plus four whole-panel white phases; falls back to the ordinary turn.
 const EpdWaveform* display_reader_gray8_turn_waveform(void);
 #endif
 /// 只把目标为白的像素再补白，其他像素保持；用于翻页后状态栏/进度条的抗积灰。

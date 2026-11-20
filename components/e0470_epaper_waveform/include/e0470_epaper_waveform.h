@@ -65,7 +65,7 @@ const EpdWaveform* e0470_settings_motion_waveform(void);
 #define E0470_GRAY8_GL16_FRAMES 30
 #endif
 extern const EpdWaveform E0470_GRAY8_WAVEFORM;
-/// 实验分支（Pico）：只返回 8 灰 GL16 的相位表。/ Experiment (Pico): GRAY8 GL16 phases only.
+/// Pico快速灰阶翻页用：只返回8灰GL16相位表。/ Pico fast-gray turns: GRAY8 GL16 phases only.
 const EpdWaveformPhases* e0470_gray8_gl16_phases_only(void);
 
 #if KIIKO_BOARD_METALIO47

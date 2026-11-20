@@ -100,8 +100,8 @@ static void set_action_in(uint8_t (*data)[16][4], int phase, int to, int from, i
 // blanks) is erased harder after a page turn, then four extra black re-drive phases darken every
 // black target to compensate for the whole-panel white push. All other transitions stay
 // vendor-original.
-// 实验分支：把上面的构造抽成通用函数，供原版（GL16 37 相）与 GRAY8（30 相）共用。
-// Experiment: the construction above, generalized so the original (GL16 37) and GRAY8 (30) share it.
+// 上面的构造抽成通用函数，供普通翻页（GL16 37 相）与快速灰阶（GRAY8 30 相）共用；普通翻页输出逐相不变。
+// The construction above, shared by ordinary (GL16 37) and fast-gray (GRAY8 30) turns; ordinary output is unchanged phase for phase.
 static bool build_turn_phases(const EpdWaveformPhases* gl, int extra, int black,
                               uint8_t (*data)[16][4], EpdWaveformPhases* out) {
     if (!gl || !gl->luts || gl->phase_times || gl->phases + extra + black > 64) return false;
@@ -143,13 +143,13 @@ const EpdWaveform* display_reader_soft_turn_waveform(void) {
     return &s_soft_waveform;
 }
 
-// 实验：快速灰阶翻页。用官方 GRAY8 的 GL16（30 相，8 级可分辨灰）代替默认 GL16（37 相），
-// 同样去掉“黑→黑”的擦白；2026-11-19 实测 0 相额外擦白残影明显，默认追加 4 相整屏擦白，重推黑仍 0 相；两个宏可在编译时覆盖。
-// 只给纯文字翻页用，封面/插图/周期全刷仍走原路径。灰阶与残影需实屏验收。
-// Experiment: fast-gray turns. Official GRAY8 GL16 (30 phases, 8 distinguishable grays) replaces
-// the default GL16 (37). Zero extra erase ghosted visibly on 2026-11-19, so four white phases are
-// appended by default with no black re-drive; both macros are compile-time tunable.
-// Text-only turns; covers, images and periodic cleanup keep their paths. Validate on the panel.
+// 快速灰阶翻页：用官方 GRAY8 的 GL16（30 相，8 级可分辨灰）代替默认 GL16（37 相），同样去掉“黑→黑”的擦白。
+// 实屏验收：不加额外相时白底残影明显，追加 4 相整屏擦白后可接受；不加重推黑。两个宏可在编译时覆盖。
+// 只给纯文字翻页用，封面/插图/周期全刷仍走原路径。
+// Fast-gray turns: official GRAY8 GL16 (30 phases, 8 distinguishable grays) replaces the default GL16 (37),
+// with the same equal black-on-black erase removal. On the panel, zero extra phases ghosted visibly and four
+// whole-panel white phases were acceptable; no black re-drive. Both macros are compile-time tunable.
+// Text-only turns; covers, images and periodic cleanup keep their paths.
 #ifndef READER_GRAY8_TURN_SETTLE_EXTRA
 #define READER_GRAY8_TURN_SETTLE_EXTRA 4
 #endif
