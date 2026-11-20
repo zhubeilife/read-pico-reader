@@ -1056,14 +1056,13 @@ enum EpdDrawError update_display_text_turn(EpdiyHighlevelState* hl,EpdRect area,
     return result;
 }
 
-// 实验：连续快翻。正文阈值成黑白后用 8 帧跟随 DU（快扫描）一次提交，停下后由阅读页补灰阶收尾。
-// Experiment: rapid consecutive turns. Threshold the body to BW and submit the 8-frame follow DU on the fast
-// scan once; the reader settles gray edges after the user stops.
+// 连续快翻：正文阈值成黑白后用 8 帧跟随 DU（快扫描）一次提交，停手后由阅读页补灰阶定稿。
+// Rapid turns: threshold the body to BW and submit the 8-frame follow DU on the fast scan once; the
+// reader settles the grays after the user stops.
 enum EpdDrawError update_display_rapid_turn(EpdiyHighlevelState* hl, EpdRect area) {
     LATENCY_DISPLAY_BEGIN();
     bool held = pico_online_display_begin();
     enum EpdDrawError result;
-    const int64_t t0 = esp_timer_get_time();
     if (display_needs_full()) result = update_display_full_unlocked(hl);
     else if (main_before_update(hl, &result)) { /* 全局恢复优先。/ Global recovery takes priority. */ }
     else if (!display_reader_fast_text_prepare(hl, area))
@@ -1079,8 +1078,6 @@ enum EpdDrawError update_display_rapid_turn(EpdiyHighlevelState* hl, EpdRect are
         if (result == EPD_DRAW_NO_PHASES_AVAILABLE) result = EPD_DRAW_SUCCESS;
         else if (result != EPD_DRAW_SUCCESS) result = main_recover(hl, result);
     }
-    ESP_LOGI(TAG, "reader rapid push area=%dx%d@%d,%d push=%lldms result=%d", area.width, area.height,
-             area.x, area.y, (long long)((esp_timer_get_time() - t0) / 1000), (int)result);
     pico_online_display_end(held);
     LATENCY_DISPLAY_END();
     return result;

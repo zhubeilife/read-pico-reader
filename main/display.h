@@ -160,7 +160,7 @@ enum EpdDrawError update_display_water_turn(EpdiyHighlevelState* hl, EpdRect are
 /// 同步普通文字翻页沿用水波纹的全部灰阶相位，单带同时输出并恢复原节拍。/ Ordinary text uses all ripple gray phases in one synchronous band and restores pacing.
 enum EpdDrawError update_display_text_turn(EpdiyHighlevelState* hl, EpdRect area, e0470_turn_dir_t dir);
 #if !KIIKO_BOARD_METALIO47
-/// 实验（Pico）：连续快翻用 8 帧跟随 DU 推阈值黑白正文。/ Experiment (Pico): rapid turns push thresholded BW body with follow DU.
+/// Pico 连续快翻：阈值黑白正文用 8 帧跟随 DU 一次推屏。/ Pico rapid turns push the thresholded BW body with the 8-frame follow DU.
 enum EpdDrawError update_display_rapid_turn(EpdiyHighlevelState* hl, EpdRect area);
 #endif
 #if KIIKO_BOARD_METALIO47
