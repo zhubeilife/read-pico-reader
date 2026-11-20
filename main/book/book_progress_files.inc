@@ -107,6 +107,7 @@ static esp_err_t disk_write(const char *key, const uint8_t *data, size_t len) {
         file = NULL;
     }
     if (!file) file = fopen(path, "wb");
+    const int64_t dt2 = esp_timer_get_time();
     if (!file) return ESP_FAIL;
     uint8_t seal[4];
     put32(seal, record_seal(data, len));

@@ -573,7 +573,7 @@ static int64_t s_poll_ms, s_last_turn_ms;
 #define READER_RAPID_GAP_MS 500
 #define READER_RAPID_SETTLE_MS 700
 static bool s_progress_save_due, s_rapid_turn_pending, s_rapid_settle_due, s_rapid_cleanup_due;
-static int64_t s_turn_done_ms = -1000000;
+static int64_t s_turn_done_ms = -1000000, s_turn_save_us, s_turn_load_us;
 static int64_t s_stats_activity_ms;
 static uint32_t s_session_read_ms, s_session_turns;
 static int s_font_page;
@@ -4930,7 +4930,6 @@ static app_redraw_t paint_reading(app_ctx_t* ctx, enum EpdDrawMode mode) {
     }
     if (cached || (keep && s_cur_body_fb && s_cur_body_page == (int)s_page)) draw_reader_outer(ctx->fb, s_page);
     else draw_reader(ctx->fb, s_page);
-#endif
     // 下一页可能预渲染于数分钟前，复制后以当前时间重绘状态栏。
     // A prefetched page can be minutes old; replace its status with the current time.
     if (cached && reader_status_visible()) reader_status_paint(ctx->fb);
@@ -6505,6 +6504,8 @@ static app_redraw_t turn_page(app_ctx_t* ctx, int dir) {
     if(!s_rc_auto_turning)rc_pause_auto();
     if (!s_text || s_clear_confirm) return APP_REDRAW_NONE;
     reader_zoom_reset();
+    ttf_bench_begin();
+    s_turn_save_us = s_turn_load_us = 0;
     const bool rapid_gap = ctx->now_ms - s_turn_done_ms < READER_RAPID_GAP_MS;
     // 页面图片表可能随跨章加载替换，旧页资格以实际成功显示的画面为准。
     // Chapter loads may replace the image table; the old-page eligibility comes from the displayed frame.
@@ -6520,8 +6521,14 @@ static app_redraw_t turn_page(app_ctx_t* ctx, int dir) {
             return APP_REDRAW_PAGE;
         }
     }
-    else if (dir > 0 && s_chapter + 1 < book_chapter_count()) { turn_save_progress(); changed = load_chapter(ctx, s_chapter + 1, 0, false); }
-    else if (dir < 0 && s_chapter) { turn_save_progress(); changed = load_chapter(ctx, s_chapter - 1, 0, true); }
+    else if (dir > 0 && s_chapter + 1 < book_chapter_count()) {
+        turn_save_progress();
+        const int64_t t = esp_timer_get_time(); changed = load_chapter(ctx, s_chapter + 1, 0, false); s_turn_load_us = esp_timer_get_time() - t;
+    }
+    else if (dir < 0 && s_chapter) {
+        turn_save_progress();
+        const int64_t t = esp_timer_get_time(); changed = load_chapter(ctx, s_chapter - 1, 0, true); s_turn_load_us = esp_timer_get_time() - t;
+    }
     else return reader_turn_chrome(ctx) ? APP_REDRAW_PAGE : APP_REDRAW_NONE;
     if (!changed) { set_reader_view(s_text ? TOC : SHELF); ctx->leaf = s_text ? book_toc_open(current_toc_position()) : 0; return APP_REDRAW_PAGE; }
     skip_hidden_image_pages(ctx, dir);
